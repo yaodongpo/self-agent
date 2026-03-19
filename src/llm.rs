@@ -37,7 +37,7 @@ impl OpenAiClient {
     }
 
     pub fn supports_data_url_images(&self) -> bool {
-        matches!(self.provider, Provider::OpenAiChatCompletions)
+        true
     }
 
     async fn chat_completions_openai(&self, req: ChatCompletionsRequest) -> Result<String> {
