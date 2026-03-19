@@ -1,0 +1,6 @@
+/target
+/.cargo-home
+/.cargo
+/memory.md
+/memory.jsonl
+/cmd/upload-service/uploads

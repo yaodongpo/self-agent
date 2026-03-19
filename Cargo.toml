@@ -1,0 +1,23 @@
+[package]
+name = "self-agent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.97"
+axum = "0.8.4"
+base64 = "0.22.1"
+clap = { version = "4.5.32", features = ["derive", "env"] }
+directories = "6.0.0"
+enigo = "0.2.1"
+hmac = "0.12.1"
+image = { version = "0.25.5", default-features = false, features = ["png"] }
+reqwest = { version = "0.12.14", default-features = false, features = ["json", "rustls-tls"] }
+rustyline = "15.0.0"
+screenshots = "0.8.10"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+sha2 = "0.10.8"
+tempfile = "3.18.0"
+tokio = { version = "1.44.0", features = ["macros", "rt-multi-thread", "process", "time", "fs"] }
+toml = "0.8.20"

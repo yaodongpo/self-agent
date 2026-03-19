@@ -1,0 +1,29 @@
+[llm]
+base_url = "https://ark.cn-beijing.volces.com/api/v3/responses"
+model = "doubao-seed-2-0-pro-260215"
+
+[python]
+venv_path = "D:/Users/DONGPO/miniconda3/envs/fast_strategy/"
+timeout_seconds = 120
+
+persona_markdown_path = "persona.md"
+workspace_root = "."
+
+[memory]
+jsonl_path = "memory.jsonl"
+md_path = "memory.md"
+summarize_every_seconds = 600
+keep_last_messages = 40
+min_messages_to_summarize = 20
+
+[dingtalk]
+enabled = false
+listen = "127.0.0.1:8088"
+path = "/dingtalk"
+webhook_url = "https://oapi.dingtalk.com/robot/send?access_token=REPLACE_ME"
+
+[telegram]
+enabled = false
+token = "123456:bot_token_here"
+allowed_chat_ids = []
+poll_interval_ms = 1200
