@@ -35,8 +35,14 @@ pub async fn execute_tool(call: &ToolCall, ctx: &ToolContext) -> Result<String> 
         "write_file" => write_file(call, ctx).await,
         "list_dir" => list_dir(call, ctx).await,
         "sleep_ms" => sleep_ms(call).await,
+        "ui_move" => ui_move(call).await,
+        "ui_mouse_down" => ui_mouse_down(call).await,
+        "ui_mouse_up" => ui_mouse_up(call).await,
         "ui_click" => ui_click(call).await,
+        "ui_drag" => ui_drag(call).await,
         "ui_type" => ui_type(call).await,
+        "ui_key_down" => ui_key_down(call).await,
+        "ui_key_up" => ui_key_up(call).await,
         "ui_keypress" => ui_keypress(call).await,
         "ui_scroll" => ui_scroll(call).await,
         "capture_screen" => capture_screen(call, ctx).await,
@@ -196,6 +202,63 @@ async fn sleep_ms(call: &ToolCall) -> Result<String> {
     Ok("ok".to_string())
 }
 
+async fn ui_move(call: &ToolCall) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Input {
+        x: i32,
+        y: i32,
+    }
+    let input: Input = serde_json::from_value(call.input.clone()).context("ui_move.input 解析失败")?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut enigo = Enigo::new(&Settings::default()).context("创建Enigo失败")?;
+        enigo
+            .move_mouse(input.x, input.y, Coordinate::Abs)
+            .context("移动鼠标失败")?;
+        Ok(())
+    })
+    .await
+    .context("ui_move 线程失败")??;
+    Ok("ok".to_string())
+}
+
+async fn ui_mouse_down(call: &ToolCall) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Input {
+        #[serde(default)]
+        button: Option<String>,
+    }
+    let input: Input = serde_json::from_value(call.input.clone()).context("ui_mouse_down.input 解析失败")?;
+    let button = parse_mouse_button(input.button.as_deref());
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut enigo = Enigo::new(&Settings::default()).context("创建Enigo失败")?;
+        enigo.button(button, Direction::Press).context("鼠标按下失败")?;
+        Ok(())
+    })
+    .await
+    .context("ui_mouse_down 线程失败")??;
+    Ok("ok".to_string())
+}
+
+async fn ui_mouse_up(call: &ToolCall) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Input {
+        #[serde(default)]
+        button: Option<String>,
+    }
+    let input: Input = serde_json::from_value(call.input.clone()).context("ui_mouse_up.input 解析失败")?;
+    let button = parse_mouse_button(input.button.as_deref());
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut enigo = Enigo::new(&Settings::default()).context("创建Enigo失败")?;
+        enigo
+            .button(button, Direction::Release)
+            .context("鼠标抬起失败")?;
+        Ok(())
+    })
+    .await
+    .context("ui_mouse_up 线程失败")??;
+    Ok("ok".to_string())
+}
+
 async fn ui_click(call: &ToolCall) -> Result<String> {
     #[derive(Deserialize)]
     struct Input {
@@ -224,6 +287,37 @@ async fn ui_click(call: &ToolCall) -> Result<String> {
     Ok("ok".to_string())
 }
 
+async fn ui_drag(call: &ToolCall) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Input {
+        from_x: i32,
+        from_y: i32,
+        to_x: i32,
+        to_y: i32,
+        #[serde(default)]
+        button: Option<String>,
+    }
+    let input: Input = serde_json::from_value(call.input.clone()).context("ui_drag.input 解析失败")?;
+    let button = parse_mouse_button(input.button.as_deref());
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut enigo = Enigo::new(&Settings::default()).context("创建Enigo失败")?;
+        enigo
+            .move_mouse(input.from_x, input.from_y, Coordinate::Abs)
+            .context("移动鼠标失败")?;
+        enigo.button(button, Direction::Press).context("鼠标按下失败")?;
+        enigo
+            .move_mouse(input.to_x, input.to_y, Coordinate::Abs)
+            .context("移动鼠标失败")?;
+        enigo
+            .button(button, Direction::Release)
+            .context("鼠标抬起失败")?;
+        Ok(())
+    })
+    .await
+    .context("ui_drag 线程失败")??;
+    Ok("ok".to_string())
+}
+
 async fn ui_type(call: &ToolCall) -> Result<String> {
     #[derive(Deserialize)]
     struct Input {
@@ -237,6 +331,42 @@ async fn ui_type(call: &ToolCall) -> Result<String> {
     })
     .await
     .context("ui_type 线程失败")??;
+    Ok("ok".to_string())
+}
+
+async fn ui_key_down(call: &ToolCall) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Input {
+        key: String,
+    }
+    let input: Input = serde_json::from_value(call.input.clone()).context("ui_key_down.input 解析失败")?;
+    let key = parse_key(&input.key).context("不支持的key")?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut enigo = Enigo::new(&Settings::default()).context("创建Enigo失败")?;
+        enigo.key(key, Direction::Press).context("按键按下失败")?;
+        Ok(())
+    })
+    .await
+    .context("ui_key_down 线程失败")??;
+    Ok("ok".to_string())
+}
+
+async fn ui_key_up(call: &ToolCall) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Input {
+        key: String,
+    }
+    let input: Input = serde_json::from_value(call.input.clone()).context("ui_key_up.input 解析失败")?;
+    let key = parse_key(&input.key).context("不支持的key")?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut enigo = Enigo::new(&Settings::default()).context("创建Enigo失败")?;
+        enigo
+            .key(key, Direction::Release)
+            .context("按键抬起失败")?;
+        Ok(())
+    })
+    .await
+    .context("ui_key_up 线程失败")??;
     Ok("ok".to_string())
 }
 
@@ -734,6 +864,12 @@ fn parse_mouse_button(button: Option<&str>) -> Button {
     match button.unwrap_or("left").to_ascii_lowercase().as_str() {
         "right" => Button::Right,
         "middle" => Button::Middle,
+        "back" | "x1" | "xbutton1" => Button::Back,
+        "forward" | "x2" | "xbutton2" => Button::Forward,
+        "scrollup" => Button::ScrollUp,
+        "scrolldown" => Button::ScrollDown,
+        "scrollleft" => Button::ScrollLeft,
+        "scrollright" => Button::ScrollRight,
         _ => Button::Left,
     }
 }
@@ -761,11 +897,45 @@ fn parse_key(s: &str) -> Option<Key> {
         "left" | "leftarrow" => Some(Key::LeftArrow),
         "right" | "rightarrow" => Some(Key::RightArrow),
         "delete" | "del" => Some(Key::Delete),
+        "insert" | "ins" => Some(Key::Insert),
         "home" => Some(Key::Home),
         "end" => Some(Key::End),
-        "pageup" => Some(Key::PageUp),
-        "pagedown" => Some(Key::PageDown),
+        "pageup" | "pgup" => Some(Key::PageUp),
+        "pagedown" | "pgdn" => Some(Key::PageDown),
         "capslock" => Some(Key::CapsLock),
+        "numlock" => Some(Key::Numlock),
+        "pause" => Some(Key::Pause),
+        "print" => Some(Key::Print),
+        "printscreen" | "prtsc" | "snapshot" => Some(Key::Snapshot),
+        "apps" | "menu" | "contextmenu" => Some(Key::Apps),
+        "browser_back" | "browserback" => Some(Key::BrowserBack),
+        "browser_forward" | "browserforward" => Some(Key::BrowserForward),
+        "browser_refresh" | "browserrefresh" => Some(Key::BrowserRefresh),
+        "browser_stop" | "browserstop" => Some(Key::BrowserStop),
+        "browser_home" | "browserhome" => Some(Key::BrowserHome),
+        "volumeup" | "volume_up" => Some(Key::VolumeUp),
+        "volumedown" | "volume_down" => Some(Key::VolumeDown),
+        "volumemute" | "volume_mute" | "mute" => Some(Key::VolumeMute),
+        "media_next" | "medianext" | "nexttrack" => Some(Key::MediaNextTrack),
+        "media_prev" | "mediaprev" | "prevtrack" => Some(Key::MediaPrevTrack),
+        "media_play_pause" | "mediaplaypause" | "playpause" => Some(Key::MediaPlayPause),
+        "media_stop" | "mediastop" => Some(Key::MediaStop),
+        "numpad0" | "kp0" => Some(Key::Numpad0),
+        "numpad1" | "kp1" => Some(Key::Numpad1),
+        "numpad2" | "kp2" => Some(Key::Numpad2),
+        "numpad3" | "kp3" => Some(Key::Numpad3),
+        "numpad4" | "kp4" => Some(Key::Numpad4),
+        "numpad5" | "kp5" => Some(Key::Numpad5),
+        "numpad6" | "kp6" => Some(Key::Numpad6),
+        "numpad7" | "kp7" => Some(Key::Numpad7),
+        "numpad8" | "kp8" => Some(Key::Numpad8),
+        "numpad9" | "kp9" => Some(Key::Numpad9),
+        "numpad_add" | "numpadadd" | "kp_add" => Some(Key::Add),
+        "numpad_subtract" | "numpadsub" | "kp_subtract" => Some(Key::Subtract),
+        "numpad_multiply" | "numpadmul" | "kp_multiply" => Some(Key::Multiply),
+        "numpad_divide" | "numpaddiv" | "kp_divide" => Some(Key::Divide),
+        "numpad_decimal" | "numpaddec" | "kp_decimal" => Some(Key::Decimal),
+        "numpad_separator" | "kp_separator" => Some(Key::Separator),
         _ => {
             if let Some(rest) = k.strip_prefix("f") {
                 if let Ok(n) = rest.parse::<u8>() {
@@ -782,6 +952,18 @@ fn parse_key(s: &str) -> Option<Key> {
                         10 => Some(Key::F10),
                         11 => Some(Key::F11),
                         12 => Some(Key::F12),
+                        13 => Some(Key::F13),
+                        14 => Some(Key::F14),
+                        15 => Some(Key::F15),
+                        16 => Some(Key::F16),
+                        17 => Some(Key::F17),
+                        18 => Some(Key::F18),
+                        19 => Some(Key::F19),
+                        20 => Some(Key::F20),
+                        21 => Some(Key::F21),
+                        22 => Some(Key::F22),
+                        23 => Some(Key::F23),
+                        24 => Some(Key::F24),
                         _ => None,
                     };
                 }

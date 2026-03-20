@@ -538,6 +538,10 @@ pub fn build_system_prompt(persona_markdown: Option<String>) -> String {
 当你要结束并给用户最终回答时，输出：
 {{"action":"final","input":"..."}}
 
+# 截图
+系统提供的截图/图片（包括 capture_screen 与自动反馈截图）会在本机采集后编码为 PNG，并以 data:image/png;base64 形式内联。
+截图分辨率与实际屏幕一致，可直接按截图坐标执行 ui_*。
+
 # 可用工具
 - run_python: {{"code":"...","args":["..."],"timeout_seconds":120}}
 - pip_install: {{"packages":["opencv-python","numpy"],"upgrade":false,"pre":false,"no_deps":false,"index_url":null,"extra_index_url":null,"timeout_seconds":600}}
@@ -545,8 +549,14 @@ pub fn build_system_prompt(persona_markdown: Option<String>) -> String {
 - write_file: {{"path":"relative/or/abs","content":"...","overwrite":false}}
 - list_dir: {{"path":"relative/or/abs"}}
 - sleep_ms: {{"ms":500}}
+- ui_move: {{"x":100,"y":200}}
+- ui_mouse_down: {{"button":"left"}}
+- ui_mouse_up: {{"button":"left"}}
 - ui_click: {{"x":100,"y":200,"button":"left","clicks":1}}
+- ui_drag: {{"from_x":100,"from_y":200,"to_x":400,"to_y":300,"button":"left"}}
 - ui_type: {{"text":"hello"}}
+- ui_key_down: {{"key":"ctrl"}}
+- ui_key_up: {{"key":"ctrl"}}
 - ui_keypress: {{"key":"enter","modifiers":["ctrl","shift"]}}
 - ui_scroll: {{"delta_y":-300,"delta_x":0}}
 - capture_screen: {{}}

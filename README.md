@@ -9,7 +9,7 @@
 - src/react.rs：ReAct 循环，工具调用协议，自动反馈/硬判定/Trace 日志
 - src/llm.rs：模型客户端与路由（OpenAI Chat Completions / Ark Responses）
 - src/tools.rs：工具实现（文件/Python/UI/截图/OCR/模板匹配/DOM 评估/pip_install）
-- src/screenshot.rs：截图采集与缩放（最长边 720px）+ PNG 编码
+- src/screenshot.rs：截图采集（不缩放）+ PNG 编码
 - src/memory.rs：记忆（memory.jsonl）与压缩摘要（memory.md）
 - src/upload.rs：上传客户端（可选，用于 URL 传图模式）
 - src/dingtalk.rs：钉钉回调控制与 webhook 回复
@@ -88,9 +88,9 @@ cargo run -- --config agent.toml --screenshot
 ```
 
 说明：
-
-- 截图会在本地截取后自动将最长边缩放到 720px，再编码为 PNG
-- 图片以 `data:image/png;base64,...` 形式内联到请求里（image\_url）
+- 截图会在本地截取后直接编码为 PNG（不缩放）
+- 图片以 `data:image/png;base64,...` 形式内联到请求里（image_url）
+- 截图分辨率与实际屏幕一致，可直接按截图坐标执行 ui_*
 
 发送指定图片文件（不截屏）：
 
@@ -144,8 +144,11 @@ Agent 以结构化 JSON 调工具，核心工具包括：
 
 - 文件：read\_file / write\_file / list\_dir
 - Python：run\_python（在指定 venv 内执行模型生成脚本）、pip\_install（给 venv 装依赖）
-- UI 自动化：ui\_click / ui\_type / ui\_keypress / ui\_scroll / sleep\_ms
-- 视觉：capture\_screen（返回图片 data url；截图会压缩到最长边 720px）
+- UI 自动化：ui\_move / ui\_mouse\_down / ui\_mouse\_up / ui\_click / ui\_drag / ui\_type / ui\_key\_down / ui\_key\_up / ui\_keypress / ui\_scroll / sleep\_ms
+  - ui\_click/button 支持：left/right/middle/back/forward
+  - ui\_keypress/key 支持常用键名：enter/tab/esc/backspace/space/insert/delete/home/end/pgup/pgdn/capslock/numlock/scrolllock/pause/print/printscreen(prtsc)/apps(menu)、方向键 up/down/left/right、F1-F24、numpad0-9、numpad\_add/\_subtract/\_multiply/\_divide/\_decimal
+  - 其它单字符按键直接用 key="a"、key="1"、key="." 等
+- 视觉：capture\_screen（返回图片 data url；截图不缩放）
 - 结构化评估器：
   - OCR：ocr\_screen / eval\_screen\_text
   - 模板匹配：match\_template（OpenCV）
@@ -347,7 +350,7 @@ poll_interval_ms = 1200
 
 ### 1) 模型看不到图片 / image\_url 无效
 
-当前默认使用 `data:image/png;base64,...` 作为 image\_url（截图会缩放到最长边 720px）。
+当前默认使用 `data:image/png;base64,...` 作为 image\_url（截图不缩放）。
 
 如果模型/网关不支持 data-url：
 - 需要切换为“先上传拿 URL，再传 image\_url”的模式（使用 upload-service / S3 / 反向代理等），并确保 URL 对模型可访问（不要是 `127.0.0.1`）
