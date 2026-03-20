@@ -434,6 +434,10 @@ pub fn build_system_prompt(persona_markdown: Option<String>) -> String {
 系统可能在你执行 ui_* 工具后，自动追加一条以 HARD_CHECK 开头的消息，里面包含结构化评估结果。
 优先依据 HARD_CHECK.verdict 来判断是否成功；成功就输出 final，失败就继续下一次工具调用JSON。
 
+# 工具失败重试
+当你看到 TOOL_ERROR / HARD_CHECK_ERROR 时，不要直接输出 final。
+你必须基于错误信息调整参数/代码并重试，或换用其他工具达成目标。
+
 # 约束
 - 不要在输出中包含除JSON以外的任何文本
 - 不要输出API Key或任何密钥

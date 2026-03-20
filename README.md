@@ -369,6 +369,13 @@ poll_interval_ms = 1200
 - OpenAI：`https://api.openai.com`
 - Ark Responses：`https://ark.../api/v3/responses`（当前实现会按 base\_url 自动路由）
 
+### 5) run\_python / pip\_install 提示找不到 Python
+
+检查 `agent.toml` 里的 `python.venv_path`，支持以下写法：
+- 直接指向解释器：`.../python.exe`
+- 指向 conda 环境目录（根目录含 python.exe）：`.../envs/xxx/`
+- 指向 venv 目录（程序会尝试 `Scripts/python.exe`）：`.../venv/`
+
 ### 5) Trace 里出现 llm\_parse\_error
 
 含义：模型输出的不是合法 JSON（常见原因是 JSON 字符串里出现了未转义的换行）。

@@ -484,19 +484,39 @@ fn resolve_venv_python(venv_path: &Path) -> Result<PathBuf> {
         return Ok(venv_path.to_path_buf());
     }
 
-    let win = venv_path.join("python.exe");
-    if win.exists() {
-        return Ok(win);
-    }
-    let unix = venv_path.join("bin").join("python");
-    if unix.exists() {
-        return Ok(unix);
+    let mut candidates = Vec::new();
+    candidates.push(venv_path.join("python.exe"));
+    candidates.push(venv_path.join("Scripts").join("python.exe"));
+    candidates.push(venv_path.join("Scripts").join("pythonw.exe"));
+    candidates.push(venv_path.join("bin").join("python"));
+
+    for c in &candidates {
+        if c.exists() {
+            return Ok(c.to_path_buf());
+        }
     }
 
-    anyhow::bail!(
-        "找不到虚拟环境Python可执行文件: venv_path={}",
-        venv_path.display()
-    )
+    if let Some(p) = find_in_path("python.exe") {
+        return Ok(p);
+    }
+
+    let attempted = candidates
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    anyhow::bail!("找不到Python可执行文件: venv_path={} attempted=[{}]", venv_path.display(), attempted)
+}
+
+fn find_in_path(exe: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let p = dir.join(exe);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 async fn run_ocr_python(ctx: &ToolContext, img_path: PathBuf, lang: String, timeout_seconds: u64) -> Result<String> {
