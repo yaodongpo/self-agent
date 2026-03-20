@@ -14,6 +14,13 @@ pub struct AgentAutoFeedbackConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct AgentTraceConfig {
+    pub enabled: bool,
+    pub show_llm_raw_on_parse_error: bool,
+    pub max_preview_chars: usize,
+}
+
+#[derive(Debug, Clone)]
 pub enum AgentHardVerifier {
     Dom {
         url: String,
@@ -37,6 +44,7 @@ pub struct Agent {
     auto_feedback: AgentAutoFeedbackConfig,
     uploader: Option<UploadClient>,
     hard_verifier: Option<AgentHardVerifier>,
+    trace: AgentTraceConfig,
 }
 
 impl Agent {
@@ -64,6 +72,11 @@ impl Agent {
             },
             uploader: None,
             hard_verifier: None,
+            trace: AgentTraceConfig {
+                enabled: true,
+                show_llm_raw_on_parse_error: true,
+                max_preview_chars: 400,
+            },
         }
     }
 
@@ -77,6 +90,10 @@ impl Agent {
 
     pub fn set_hard_verifier(&mut self, verifier: Option<AgentHardVerifier>) {
         self.hard_verifier = verifier;
+    }
+
+    pub fn set_trace(&mut self, trace: AgentTraceConfig) {
+        self.trace = trace;
     }
 
     pub fn push_user_text(&mut self, text: String) {
@@ -111,7 +128,7 @@ impl Agent {
                 .await;
         }
 
-        for _ in 0..self.max_steps {
+        for step in 0..self.max_steps {
             let req = ChatCompletionsRequest {
                 model: self.model.clone(),
                 messages: self.messages.clone(),
@@ -121,21 +138,42 @@ impl Agent {
             let raw = self.client.chat_completions(req).await?;
             let trimmed = raw.trim();
 
-            let call = serde_json::from_str::<ToolCall>(trimmed);
-            match call {
-                Ok(call) => {
+            let parsed = parse_tool_call_with_repair(trimmed);
+            match parsed {
+                Ok((call, repaired)) => {
+                    if repaired {
+                        self.trace_event(
+                            step,
+                            "llm_parse_repaired",
+                            &serde_json::json!({ "len": raw.len(), "preview": preview(&raw, self.trace.max_preview_chars) }),
+                        );
+                    }
                     if call.action == "final" {
                         let final_text = call
                             .input
                             .as_str()
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| call.input.to_string());
+                        self.trace_event(
+                            step,
+                            "final",
+                            &serde_json::json!({ "len": final_text.len(), "preview": preview(&final_text, self.trace.max_preview_chars) }),
+                        );
                         self.messages.push(ChatMessage {
                             role: "assistant".to_string(),
                             content: MessageContent::Text(final_text.clone()),
                         });
                         return Ok(final_text);
                     }
+
+                    self.trace_event(
+                        step,
+                        "tool_call",
+                        &serde_json::json!({
+                            "action": call.action.clone(),
+                            "input": sanitize_json(&call.input, self.trace.max_preview_chars),
+                        }),
+                    );
 
                     let tool_out = match execute_tool(&call, &self.tool_ctx).await {
                         Ok(s) => s,
@@ -144,6 +182,16 @@ impl Agent {
                             format!("TOOL_ERROR {}\n{}", call.action, e)
                         }
                     };
+
+                    self.trace_event(
+                        step,
+                        "tool_result",
+                        &serde_json::json!({
+                            "action": call.action.clone(),
+                            "len": tool_out.len(),
+                            "preview": preview(&tool_out, self.trace.max_preview_chars),
+                        }),
+                    );
 
                     if tool_errors > 6 {
                         return Ok("工具连续报错次数过多，已停止。请检查环境/权限/依赖，或降低任务难度。".to_string());
@@ -178,6 +226,16 @@ impl Agent {
                     }
                 }
                 Err(_) => {
+                    if self.trace.enabled && self.trace.show_llm_raw_on_parse_error {
+                        self.trace_event(
+                            step,
+                            "llm_parse_error",
+                            &serde_json::json!({
+                                "len": raw.len(),
+                                "preview": preview(&raw, self.trace.max_preview_chars),
+                            }),
+                        );
+                    }
                     self.messages.push(ChatMessage {
                         role: "assistant".to_string(),
                         content: MessageContent::Text(raw.clone()),
@@ -234,6 +292,16 @@ impl Agent {
         };
 
         let verdict = hard_check_verdict(call.action.as_str(), &raw);
+        self.trace_event(
+            0,
+            "hard_check",
+            &serde_json::json!({
+                "tool": call.action.clone(),
+                "verdict": verdict,
+                "raw_len": raw.len(),
+                "raw_preview": preview(&raw, self.trace.max_preview_chars),
+            }),
+        );
         let msg = serde_json::json!({
             "type": "hard_check",
             "tool": call.action,
@@ -309,6 +377,18 @@ impl Agent {
             "当前模型不支持data url图片。请先配置上传服务，再启用自动截图评估闭环。",
         )?;
         uploader.upload_png(png).await
+    }
+
+    fn trace_event(&self, step: usize, kind: &str, payload: &serde_json::Value) {
+        if !self.trace.enabled {
+            return;
+        }
+        eprintln!(
+            "[trace] step={} kind={} {}",
+            step,
+            kind,
+            preview(&payload.to_string(), self.trace.max_preview_chars)
+        );
     }
 }
 
@@ -387,5 +467,119 @@ fn hard_check_verdict(tool: &str, raw: &str) -> serde_json::Value {
             }
         }
         _ => serde_json::json!({ "ok": false }),
+    }
+}
+
+fn preview(s: &str, max_chars: usize) -> String {
+    let max_chars = max_chars.max(80);
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out = s.chars().take(max_chars).collect::<String>();
+    out.push('…');
+    out
+}
+
+fn sanitize_json(v: &serde_json::Value, max_preview_chars: usize) -> serde_json::Value {
+    match v {
+        serde_json::Value::Null => serde_json::Value::Null,
+        serde_json::Value::Bool(b) => serde_json::Value::Bool(*b),
+        serde_json::Value::Number(n) => serde_json::Value::Number(n.clone()),
+        serde_json::Value::String(s) => serde_json::Value::String(sanitize_string(s, max_preview_chars)),
+        serde_json::Value::Array(arr) => serde_json::Value::Array(arr.iter().map(|x| sanitize_json(x, max_preview_chars)).collect()),
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                if looks_sensitive_key(k) {
+                    out.insert(k.clone(), serde_json::Value::String("<redacted>".to_string()));
+                } else {
+                    out.insert(k.clone(), sanitize_json(val, max_preview_chars));
+                }
+            }
+            serde_json::Value::Object(out)
+        }
+    }
+}
+
+fn sanitize_string(s: &str, max_preview_chars: usize) -> String {
+    let lower = s.to_ascii_lowercase();
+    if lower.starts_with("data:image/") {
+        return format!("<data_url len={}>", s.len());
+    }
+    if s.chars().count() > max_preview_chars {
+        return format!("<string len={} preview={}>", s.len(), preview(s, max_preview_chars));
+    }
+    s.to_string()
+}
+
+fn looks_sensitive_key(k: &str) -> bool {
+    let k = k.to_ascii_lowercase();
+    k.contains("api_key") || k.contains("apikey") || k.contains("token") || k.contains("secret") || k.contains("password")
+}
+
+fn parse_tool_call_with_repair(s: &str) -> Result<(ToolCall, bool)> {
+    match serde_json::from_str::<ToolCall>(s) {
+        Ok(v) => Ok((v, false)),
+        Err(_) => {
+            let repaired = repair_json_string_literals(s);
+            let v = serde_json::from_str::<ToolCall>(&repaired).context("解析工具调用JSON失败")?;
+            Ok((v, true))
+        }
+    }
+}
+
+fn repair_json_string_literals(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 32);
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in s.chars() {
+        if !in_string {
+            out.push(ch);
+            if ch == '"' {
+                in_string = true;
+                escaped = false;
+            }
+            continue;
+        }
+
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                out.push(ch);
+                escaped = true;
+            }
+            '"' => {
+                out.push(ch);
+                in_string = false;
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repairs_newlines_in_json_string() {
+        let raw = "{\"action\":\"run_python\",\"input\":{\"code\":\"import \nwebbrowser\\nprint('x')\"}}";
+        let (parsed, repaired) = parse_tool_call_with_repair(raw).unwrap();
+        assert!(repaired);
+        assert_eq!(parsed.action, "run_python");
     }
 }

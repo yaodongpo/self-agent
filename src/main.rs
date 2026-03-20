@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use crate::config::{load_config_file, merge_config};
 use crate::llm::OpenAiClient;
 use crate::memory::{MemoryConfig, MemoryManager};
-use crate::react::{build_system_prompt, Agent, AgentAutoFeedbackConfig, AgentHardVerifier};
+use crate::react::{build_system_prompt, Agent, AgentAutoFeedbackConfig, AgentHardVerifier, AgentTraceConfig};
 use crate::tools::ToolContext;
 use crate::upload::UploadClient;
 
@@ -145,6 +145,15 @@ struct Cli {
 
     #[arg(long, default_value_t = 120)]
     hard_template_timeout_seconds: u64,
+
+    #[arg(long, default_value_t = true)]
+    trace: bool,
+
+    #[arg(long, default_value_t = true)]
+    trace_llm_raw_on_parse_error: bool,
+
+    #[arg(long, default_value_t = 400)]
+    trace_max_preview_chars: usize,
 }
 
 #[tokio::main]
@@ -236,6 +245,12 @@ async fn main() -> Result<()> {
         None
     };
     agent.set_hard_verifier(hard);
+
+    agent.set_trace(AgentTraceConfig {
+        enabled: cli.trace,
+        show_llm_raw_on_parse_error: cli.trace_llm_raw_on_parse_error,
+        max_preview_chars: cli.trace_max_preview_chars,
+    });
 
     let memory_cfg = MemoryConfig {
         jsonl_path: cfg.memory.jsonl_path.clone(),
