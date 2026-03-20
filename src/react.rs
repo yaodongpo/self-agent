@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use base64::Engine;
+use serde::Deserialize;
 
 use crate::llm::{ChatCompletionsRequest, ChatMessage, ContentPart, ImageUrl, MessageContent, OpenAiClient};
 use crate::screenshot;
@@ -122,6 +123,7 @@ impl Agent {
     pub async fn run_turn(&mut self) -> Result<String> {
         let mut feedback_rounds_used = 0usize;
         let mut tool_errors = 0usize;
+        let mut auto_retry_missing_deps_left = 2usize;
         if self.auto_feedback.enabled {
             let _ = self
                 .inject_screenshot_feedback("INITIAL_SCREEN", None, &mut feedback_rounds_used)
@@ -140,11 +142,18 @@ impl Agent {
 
             let parsed = parse_tool_call_with_repair(trimmed);
             match parsed {
-                Ok((call, repaired)) => {
-                    if repaired {
+                Ok((call, meta)) => {
+                    if meta.repaired {
                         self.trace_event(
                             step,
                             "llm_parse_repaired",
+                            &serde_json::json!({ "len": raw.len(), "preview": preview(&raw, self.trace.max_preview_chars) }),
+                        );
+                    }
+                    if meta.extracted {
+                        self.trace_event(
+                            step,
+                            "llm_parse_extracted",
                             &serde_json::json!({ "len": raw.len(), "preview": preview(&raw, self.trace.max_preview_chars) }),
                         );
                     }
@@ -175,7 +184,7 @@ impl Agent {
                         }),
                     );
 
-                    let tool_out = match execute_tool(&call, &self.tool_ctx).await {
+                    let mut tool_out = match execute_tool(&call, &self.tool_ctx).await {
                         Ok(s) => s,
                         Err(e) => {
                             tool_errors += 1;
@@ -192,6 +201,26 @@ impl Agent {
                             "preview": preview(&tool_out, self.trace.max_preview_chars),
                         }),
                     );
+
+                    while auto_retry_missing_deps_left > 0 {
+                        let Some(new_out) = self
+                            .maybe_auto_retry_run_python_missing_deps(step, &call, &tool_out)
+                            .await?
+                        else {
+                            break;
+                        };
+                        auto_retry_missing_deps_left -= 1;
+                        tool_out = new_out;
+                        self.trace_event(
+                            step,
+                            "tool_result_after_retry",
+                            &serde_json::json!({
+                                "action": call.action.clone(),
+                                "len": tool_out.len(),
+                                "preview": preview(&tool_out, self.trace.max_preview_chars),
+                            }),
+                        );
+                    }
 
                     if tool_errors > 6 {
                         return Ok("工具连续报错次数过多，已停止。请检查环境/权限/依赖，或降低任务难度。".to_string());
@@ -390,6 +419,102 @@ impl Agent {
             preview(&payload.to_string(), self.trace.max_preview_chars)
         );
     }
+
+    async fn maybe_auto_retry_run_python_missing_deps(
+        &mut self,
+        step: usize,
+        call: &ToolCall,
+        tool_out: &str,
+    ) -> Result<Option<String>> {
+        if call.action != "run_python" {
+            return Ok(None);
+        }
+        if tool_out.contains("exit_code=0") {
+            return Ok(None);
+        }
+        let Some(module) = detect_missing_python_module(tool_out) else {
+            return Ok(None);
+        };
+
+        let packages = module_to_packages(&module);
+        if packages.is_empty() {
+            return Ok(None);
+        }
+        self.trace_event(
+            step,
+            "auto_retry_missing_dep",
+            &serde_json::json!({ "module": module, "packages": packages }),
+        );
+
+        let pip_call = ToolCall {
+            action: "pip_install".to_string(),
+            input: serde_json::json!({
+                "packages": packages,
+                "upgrade": false,
+                "pre": false,
+                "no_deps": false,
+                "timeout_seconds": 600
+            }),
+        };
+
+        self.trace_event(
+            step,
+            "tool_call_auto",
+            &serde_json::json!({
+                "action": pip_call.action.clone(),
+                "input": sanitize_json(&pip_call.input, self.trace.max_preview_chars),
+            }),
+        );
+        let pip_out = execute_tool(&pip_call, &self.tool_ctx)
+            .await
+            .unwrap_or_else(|e| format!("TOOL_ERROR pip_install\n{e}"));
+
+        self.trace_event(
+            step,
+            "tool_result_auto",
+            &serde_json::json!({
+                "action": "pip_install",
+                "len": pip_out.len(),
+                "preview": preview(&pip_out, self.trace.max_preview_chars),
+            }),
+        );
+        self.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: MessageContent::Text(format!("TOOL_RESULT pip_install\n{}", pip_out.trim_end())),
+        });
+
+        if parse_exit_code(&pip_out).unwrap_or(-1) != 0 {
+            let merged = format!(
+                "{}\nAUTO_PIP_INSTALL_FAILED\n{}",
+                tool_out.trim_end(),
+                pip_out.trim_end()
+            );
+            return Ok(Some(merged));
+        }
+
+        self.trace_event(
+            step,
+            "tool_call_auto",
+            &serde_json::json!({
+                "action": call.action.clone(),
+                "input": sanitize_json(&call.input, self.trace.max_preview_chars),
+            }),
+        );
+        let rerun_out = execute_tool(call, &self.tool_ctx)
+            .await
+            .unwrap_or_else(|e| format!("TOOL_ERROR run_python\n{e}"));
+
+        self.trace_event(
+            step,
+            "tool_result_auto",
+            &serde_json::json!({
+                "action": "run_python",
+                "len": rerun_out.len(),
+                "preview": preview(&rerun_out, self.trace.max_preview_chars),
+            }),
+        );
+        Ok(Some(rerun_out))
+    }
 }
 
 pub fn build_system_prompt(persona_markdown: Option<String>) -> String {
@@ -521,15 +646,34 @@ fn looks_sensitive_key(k: &str) -> bool {
     k.contains("api_key") || k.contains("apikey") || k.contains("token") || k.contains("secret") || k.contains("password")
 }
 
-fn parse_tool_call_with_repair(s: &str) -> Result<(ToolCall, bool)> {
-    match serde_json::from_str::<ToolCall>(s) {
-        Ok(v) => Ok((v, false)),
-        Err(_) => {
-            let repaired = repair_json_string_literals(s);
-            let v = serde_json::from_str::<ToolCall>(&repaired).context("解析工具调用JSON失败")?;
-            Ok((v, true))
-        }
+#[derive(Debug, Clone, Copy)]
+struct ParseMeta {
+    repaired: bool,
+    extracted: bool,
+}
+
+fn parse_tool_call_with_repair(s: &str) -> Result<(ToolCall, ParseMeta)> {
+    let without_fence = strip_code_fences(s);
+    let trimmed = without_fence.trim();
+    let (candidate, extracted) = if let Some(pos) = trimmed.find('{') {
+        (&trimmed[pos..], pos > 0)
+    } else {
+        (trimmed, false)
+    };
+
+    if let Ok(v) = deserialize_first_json_value::<ToolCall>(candidate) {
+        return Ok((v, ParseMeta { repaired: false, extracted }));
     }
+
+    let repaired = repair_json_string_literals(candidate);
+    let v = deserialize_first_json_value::<ToolCall>(&repaired).context("解析工具调用JSON失败")?;
+    Ok((v, ParseMeta { repaired: true, extracted }))
+}
+
+fn deserialize_first_json_value<T: for<'de> Deserialize<'de>>(s: &str) -> Result<T> {
+    let mut de = serde_json::Deserializer::from_str(s);
+    let v = T::deserialize(&mut de).context("反序列化JSON失败")?;
+    Ok(v)
 }
 
 fn repair_json_string_literals(s: &str) -> String {
@@ -575,6 +719,68 @@ fn repair_json_string_literals(s: &str) -> String {
     out
 }
 
+fn strip_code_fences(s: &str) -> &str {
+    let start = match s.find("```") {
+        Some(i) => i,
+        None => return s,
+    };
+    let rest = &s[start + 3..];
+    let rest = match rest.find('\n') {
+        Some(i) => &rest[i + 1..],
+        None => rest,
+    };
+    match rest.find("```") {
+        Some(end) => &rest[..end],
+        None => s,
+    }
+}
+
+fn detect_missing_python_module(tool_out: &str) -> Option<String> {
+    for line in tool_out.lines() {
+        let line = line.trim();
+        for pat in [
+            "ModuleNotFoundError: No module named ",
+            "ImportError: No module named ",
+        ] {
+            if let Some(pos) = line.find(pat) {
+                let rest = line[pos + pat.len()..].trim();
+                let mod_name = rest.trim_matches('\'').trim_matches('"').trim();
+                if !mod_name.is_empty() {
+                    return Some(mod_name.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn module_to_packages(module: &str) -> Vec<String> {
+    match module {
+        "bs4" => vec!["beautifulsoup4".to_string()],
+        "cv2" => vec!["opencv-python".to_string()],
+        "PIL" => vec!["pillow".to_string()],
+        "playwright" => vec!["playwright".to_string()],
+        "pytesseract" => vec!["pytesseract".to_string()],
+        "easyocr" => vec!["easyocr".to_string()],
+        _ => {
+            let safe = module
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+            if safe && module.len() <= 64 {
+                vec![module.to_string()]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
+fn parse_exit_code(out: &str) -> Option<i32> {
+    let line = out.lines().next()?.trim();
+    let rest = line.strip_prefix("exit_code=")?;
+    rest.trim().parse::<i32>().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,8 +788,16 @@ mod tests {
     #[test]
     fn repairs_newlines_in_json_string() {
         let raw = "{\"action\":\"run_python\",\"input\":{\"code\":\"import \nwebbrowser\\nprint('x')\"}}";
-        let (parsed, repaired) = parse_tool_call_with_repair(raw).unwrap();
-        assert!(repaired);
+        let (parsed, meta) = parse_tool_call_with_repair(raw).unwrap();
+        assert!(meta.repaired);
         assert_eq!(parsed.action, "run_python");
+    }
+
+    #[test]
+    fn parses_json_wrapped_in_text() {
+        let raw = "prefix...\n{\"action\":\"final\",\"input\":\"ok\"}\ntrailing";
+        let (parsed, meta) = parse_tool_call_with_repair(raw).unwrap();
+        assert!(meta.extracted);
+        assert_eq!(parsed.action, "final");
     }
 }

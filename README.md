@@ -358,6 +358,7 @@ poll_interval_ms = 1200
   - OpenCV：`opencv-python numpy`
   - Playwright：`playwright` + 执行 `playwright install`
   - OCR：`pillow pytesseract`（并安装 tesseract）或 `easyocr`
+说明：run\_python 遇到 `ModuleNotFoundError` 时，程序会尝试自动执行一次 pip\_install 并重跑（每次 turn 最多重试 2 次）；仍失败时再手动处理。
 
 ### 3) UI 自动化无效/点错
 
@@ -381,7 +382,9 @@ poll_interval_ms = 1200
 含义：模型输出的不是合法 JSON（常见原因是 JSON 字符串里出现了未转义的换行）。
 
 处理：
-- 程序会自动修复一部分常见错误（Trace 里会出现 llm\_parse\_repaired）
+- 程序会自动修复/提取一部分常见错误：
+  - llm\_parse\_repaired：修复了字符串里的未转义换行/控制字符
+  - llm\_parse\_extracted：从模型输出中提取出 JSON 部分并继续执行
 - 如果仍然失败，建议在 prompt 里强调：JSON 字符串内使用 `\\n`，不要输出真实换行
 
 ## 安全与注意事项

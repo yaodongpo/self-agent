@@ -484,11 +484,12 @@ fn resolve_venv_python(venv_path: &Path) -> Result<PathBuf> {
         return Ok(venv_path.to_path_buf());
     }
 
-    let mut candidates = Vec::new();
-    candidates.push(venv_path.join("python.exe"));
-    candidates.push(venv_path.join("Scripts").join("python.exe"));
-    candidates.push(venv_path.join("Scripts").join("pythonw.exe"));
-    candidates.push(venv_path.join("bin").join("python"));
+    let candidates = vec![
+        venv_path.join("python.exe"),
+        venv_path.join("Scripts").join("python.exe"),
+        venv_path.join("Scripts").join("pythonw.exe"),
+        venv_path.join("bin").join("python"),
+    ];
 
     for c in &candidates {
         if c.exists() {
