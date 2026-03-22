@@ -1,5 +1,6 @@
 mod config;
 mod dingtalk;
+mod image_transport;
 mod llm;
 mod memory;
 mod react;
@@ -12,7 +13,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use base64::Engine;
 use clap::Parser;
 use directories::ProjectDirs;
 use rustyline::error::ReadlineError;
@@ -20,6 +20,7 @@ use rustyline::DefaultEditor;
 use tokio::sync::Mutex;
 
 use crate::config::{load_config_file, merge_config};
+use crate::image_transport::{image_url_from_bytes, ImageTransportMode};
 use crate::llm::OpenAiClient;
 use crate::memory::{MemoryConfig, MemoryManager};
 use crate::react::{build_system_prompt, Agent, AgentAutoFeedbackConfig, AgentHardVerifier, AgentTraceConfig};
@@ -58,6 +59,9 @@ struct Cli {
 
     #[arg(long)]
     image: Option<PathBuf>,
+
+    #[arg(long, env = "SELF_AGENT_IMAGE_TRANSPORT", default_value = "inline")]
+    image_transport: String,
 
     #[arg(long)]
     once: Option<String>,
@@ -201,13 +205,19 @@ async fn main() -> Result<()> {
         Some(ep) if !ep.trim().is_empty() => Some(UploadClient::new(ep, cli.upload_api_key.clone())?),
         _ => None,
     };
+    let uploader_cloned = uploader.clone();
+    let uploader_cloned1 = uploader.clone();
+    let uploader_cloned2 = uploader.clone();
+
+    let image_transport = ImageTransportMode::parse(&cli.image_transport)
+        .context("image_transport 仅支持: inline|upload|auto")?;
 
     let tool_ctx = ToolContext {
         python_venv_path: cfg.python.venv_path.clone(),
         python_timeout_seconds: cfg.python.timeout_seconds,
         workspace_root: cfg.workspace_root.clone(),
-        supports_data_url_images: client.supports_data_url_images(),
-        uploader: uploader.clone(),
+        uploader: uploader_cloned,
+        image_transport,
     };
     let mut agent = Agent::new(
         client.clone(),
@@ -309,12 +319,19 @@ async fn main() -> Result<()> {
             let _ = crate::telegram::run_bot(tg, agent2, mem2).await;
         });
     }
-
     if let Some(text) = cli.once {
-        {
-            let mut a = agent.lock().await;
-            push_user_input(&mut a, text, cli.screenshot, cli.image).await?;
-        }
+                {
+                    let mut a = agent.lock().await;
+                    push_user_input(
+                        &mut a,
+                        text,
+                        cli.screenshot,
+                        cli.image,
+                        uploader_cloned1,
+                        image_transport,
+                    )
+                    .await?;
+                }
         let out = {
             let mut a = agent.lock().await;
             a.run_turn().await?
@@ -341,7 +358,15 @@ async fn main() -> Result<()> {
                 rl.add_history_entry(line.as_str())?;
                 {
                     let mut a = agent.lock().await;
-                    push_user_input(&mut a, line, cli.screenshot, cli.image.clone()).await?;
+                    push_user_input(
+                        &mut a,
+                        line,
+                        cli.screenshot,
+                        cli.image.clone(),
+                        uploader_cloned2.clone(),
+                        image_transport,
+                    )
+                    .await?;
                 }
                 let out = {
                     let mut a = agent.lock().await;
@@ -365,17 +390,20 @@ async fn push_user_input(
     text: String,
     with_screenshot: bool,
     image_path: Option<PathBuf>,
+    uploader: Option<UploadClient>,
+    image_transport: ImageTransportMode,
 ) -> Result<()> {
     if let Some(p) = image_path {
-        let data_url = file_to_data_url(&p)?;
-        agent.push_user_text_with_image_data_url(text, data_url);
+        let (mime, bytes) = read_image_bytes(&p)?;
+        let url = image_url_from_bytes(&mime, &bytes, image_transport, uploader).await?;
+        agent.push_user_text_with_image_data_url(text, url);
         return Ok(());
     }
 
     if with_screenshot {
         let png = screenshot::capture_primary_png()?;
-        let data_url = png_to_data_url(png);
-        agent.push_user_text_with_image_data_url(text, data_url);
+        let url = image_url_from_bytes("image/png", &png, image_transport, uploader).await?;
+        agent.push_user_text_with_image_data_url(text, url);
         return Ok(());
     }
 
@@ -383,7 +411,7 @@ async fn push_user_input(
     Ok(())
 }
 
-fn file_to_data_url(path: &PathBuf) -> Result<String> {
+fn read_image_bytes(path: &PathBuf) -> Result<(String, Vec<u8>)> {
     let bytes = std::fs::read(path).with_context(|| format!("读取图片失败: {}", path.display()))?;
     let ext = path
         .extension()
@@ -396,18 +424,7 @@ fn file_to_data_url(path: &PathBuf) -> Result<String> {
         "webp" => "image/webp",
         _ => "application/octet-stream",
     };
-    Ok(format!(
-        "data:{};base64,{}",
-        mime,
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    ))
-}
-
-fn png_to_data_url(png: Vec<u8>) -> String {
-    format!(
-        "data:image/png;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(png)
-    )
+    Ok((mime.to_string(), bytes))
 }
 
 fn default_config_path() -> PathBuf {

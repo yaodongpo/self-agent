@@ -21,8 +21,12 @@ impl UploadClient {
     }
 
     pub async fn upload_png(&self, bytes: Vec<u8>) -> Result<String> {
+        self.upload_bytes("image/png", &bytes).await
+    }
+
+    pub async fn upload_bytes(&self, mime: &str, bytes: &[u8]) -> Result<String> {
         let body = serde_json::json!({
-            "mime": "image/png",
+            "mime": mime,
             "data_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
         });
 

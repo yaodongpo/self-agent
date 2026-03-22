@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use base64::Engine;
 use serde::Deserialize;
 
+use crate::image_transport::image_url_from_bytes;
 use crate::llm::{ChatCompletionsRequest, ChatMessage, ContentPart, ImageUrl, MessageContent, OpenAiClient};
 use crate::screenshot;
 use crate::tools::{execute_tool, ToolCall, ToolContext};
@@ -87,6 +87,7 @@ impl Agent {
 
     pub fn set_uploader(&mut self, uploader: Option<UploadClient>) {
         self.uploader = uploader;
+        self.tool_ctx.uploader = self.uploader.clone();
     }
 
     pub fn set_hard_verifier(&mut self, verifier: Option<AgentHardVerifier>) {
@@ -395,17 +396,13 @@ impl Agent {
     }
 
     async fn png_to_image_url(&self, png: Vec<u8>) -> Result<String> {
-        if self.client.supports_data_url_images() {
-            return Ok(format!(
-                "data:image/png;base64,{}",
-                base64::engine::general_purpose::STANDARD.encode(png)
-            ));
-        }
-
-        let uploader = self.uploader.clone().context(
-            "当前模型不支持data url图片。请先配置上传服务，再启用自动截图评估闭环。",
-        )?;
-        uploader.upload_png(png).await
+        image_url_from_bytes(
+            "image/png",
+            &png,
+            self.tool_ctx.image_transport,
+            self.tool_ctx.uploader.clone(),
+        )
+        .await
     }
 
     fn trace_event(&self, step: usize, kind: &str, payload: &serde_json::Value) {
@@ -539,8 +536,13 @@ pub fn build_system_prompt(persona_markdown: Option<String>) -> String {
 {{"action":"final","input":"..."}}
 
 # 截图
-系统提供的截图/图片（包括 capture_screen 与自动反馈截图）会在本机采集后编码为 PNG，并以 data:image/png;base64 形式内联。
+系统提供的截图/图片（包括 capture_screen 与自动反馈截图）会在本机采集后编码为 PNG，并作为 image_url 传入：
+- 默认是 data:image/png;base64 形式内联
+- 若启用了上传模式，则会是可访问的 URL
 截图分辨率与实际屏幕一致，可直接按截图坐标执行 ui_*。
+
+# 电脑操作建议
+在执行 ui_* 之前，优先调用 ui_get_screens / ui_get_active_window / ui_get_cursor_pos 获取确定性状态，再结合截图决定坐标与动作。
 
 # 可用工具
 - run_python: {{"code":"...","args":["..."],"timeout_seconds":120}}
@@ -549,6 +551,9 @@ pub fn build_system_prompt(persona_markdown: Option<String>) -> String {
 - write_file: {{"path":"relative/or/abs","content":"...","overwrite":false}}
 - list_dir: {{"path":"relative/or/abs"}}
 - sleep_ms: {{"ms":500}}
+- ui_get_cursor_pos: {{}}
+- ui_get_screens: {{}}
+- ui_get_active_window: {{}}
 - ui_move: {{"x":100,"y":200}}
 - ui_mouse_down: {{"button":"left"}}
 - ui_mouse_up: {{"button":"left"}}

@@ -10,6 +10,7 @@ use tokio::time::{timeout, Duration};
 
 use crate::screenshot;
 use crate::upload::UploadClient;
+use crate::image_transport::{image_url_from_bytes, ImageTransportMode};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -23,8 +24,8 @@ pub struct ToolContext {
     pub python_venv_path: PathBuf,
     pub python_timeout_seconds: u64,
     pub workspace_root: PathBuf,
-    pub supports_data_url_images: bool,
     pub uploader: Option<UploadClient>,
+    pub image_transport: ImageTransportMode,
 }
 
 pub async fn execute_tool(call: &ToolCall, ctx: &ToolContext) -> Result<String> {
@@ -35,6 +36,9 @@ pub async fn execute_tool(call: &ToolCall, ctx: &ToolContext) -> Result<String> 
         "write_file" => write_file(call, ctx).await,
         "list_dir" => list_dir(call, ctx).await,
         "sleep_ms" => sleep_ms(call).await,
+        "ui_get_cursor_pos" => ui_get_cursor_pos(call).await,
+        "ui_get_screens" => ui_get_screens(call).await,
+        "ui_get_active_window" => ui_get_active_window(call).await,
         "ui_move" => ui_move(call).await,
         "ui_mouse_down" => ui_mouse_down(call).await,
         "ui_mouse_up" => ui_mouse_up(call).await,
@@ -52,6 +56,111 @@ pub async fn execute_tool(call: &ToolCall, ctx: &ToolContext) -> Result<String> 
         "eval_dom" => eval_dom(call, ctx).await,
         other => Ok(format!("未知工具: {other}")),
     }
+}
+
+async fn ui_get_cursor_pos(_call: &ToolCall) -> Result<String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut pt = POINT { x: 0, y: 0 };
+        let ok = unsafe { GetCursorPos(&mut pt) };
+        if ok == 0 {
+            anyhow::bail!("GetCursorPos 失败");
+        }
+        return Ok(serde_json::json!({ "x": pt.x, "y": pt.y }).to_string());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        anyhow::bail!("ui_get_cursor_pos 仅支持 Windows");
+    }
+}
+
+async fn ui_get_screens(_call: &ToolCall) -> Result<String> {
+    let screens = screenshots::Screen::all().context("获取屏幕列表失败")?;
+    let items = screens
+        .into_iter()
+        .map(|s| {
+            let d = s.display_info;
+            serde_json::json!({
+                "id": d.id,
+                "x": d.x,
+                "y": d.y,
+                "width": d.width,
+                "height": d.height,
+                "scale_factor": d.scale_factor,
+                "rotation": d.rotation,
+                "frequency": d.frequency,
+                "is_primary": d.is_primary,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({ "screens": items }).to_string())
+}
+
+async fn ui_get_active_window(_call: &ToolCall) -> Result<String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::System::ProcessStatus::GetProcessImageFileNameW;
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        };
+
+        let hwnd: HWND = unsafe { GetForegroundWindow() };
+        if hwnd.is_null() {
+            return Ok(serde_json::json!({ "ok": false }).to_string());
+        }
+
+        let len = unsafe { GetWindowTextLengthW(hwnd) };
+        let title = if len > 0 {
+            let mut buf = vec![0u16; (len as usize) + 1];
+            let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+            wide_to_string(&buf[..(n.max(0) as usize)])
+        } else {
+            String::new()
+        };
+
+        let mut pid: u32 = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+
+        let mut process_path = None;
+        if pid != 0 {
+            let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+            if !handle.is_null() {
+                let mut buf = vec![0u16; 1024];
+                let mut size: u32 = buf.len() as u32;
+                let ok = unsafe { windows_sys::Win32::System::ProcessStatus::GetProcessImageFileNameW(handle, buf.as_mut_ptr(), buf.len() as u32) };
+                if ok != 0 && size > 0 {
+                    process_path = Some(wide_to_string(&buf[..(size as usize)]));
+                }
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            }
+        }
+
+        return Ok(
+            serde_json::json!({
+                "ok": true,
+
+                "hwnd": hwnd as isize,
+                "pid": pid,
+                "title": title,
+                "process_path": process_path,
+            })
+            .to_string(),
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        anyhow::bail!("ui_get_active_window 仅支持 Windows");
+    }
+}
+
+fn wide_to_string(s: &[u16]) -> String {
+    String::from_utf16_lossy(s)
+        .trim_end_matches('\u{0}')
+        .to_string()
 }
 
 async fn run_python(call: &ToolCall, ctx: &ToolContext) -> Result<String> {
@@ -435,17 +544,13 @@ async fn capture_screen(_call: &ToolCall, ctx: &ToolContext) -> Result<String> {
     let png = tokio::task::spawn_blocking(screenshot::capture_primary_png)
         .await
         .context("截图任务失败")??;
-    if ctx.supports_data_url_images {
-        return Ok(format!(
-            "data:image/png;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(png)
-        ));
-    }
-    let uploader = ctx
-        .uploader
-        .clone()
-        .context("当前环境未配置上传服务(uploader)，无法返回图片URL")?;
-    uploader.upload_png(png).await
+    image_url_from_bytes(
+        "image/png",
+        &png,
+        ctx.image_transport,
+        ctx.uploader.clone(),
+    )
+    .await
 }
 
 async fn ocr_screen(call: &ToolCall, ctx: &ToolContext) -> Result<String> {

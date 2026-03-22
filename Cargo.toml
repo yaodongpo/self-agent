@@ -21,3 +21,4 @@ sha2 = "0.10.8"
 tempfile = "3.18.0"
 tokio = { version = "1.44.0", features = ["macros", "rt-multi-thread", "process", "time", "fs"] }
 toml = "0.8.20"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
